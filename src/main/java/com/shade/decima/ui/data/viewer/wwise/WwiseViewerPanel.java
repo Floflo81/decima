@@ -30,6 +30,9 @@ import javax.sound.sampled.Clip;
 import javax.sound.sampled.DataLine;
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -109,7 +112,7 @@ public class WwiseViewerPanel extends JPanel implements Disposable {
         player.close();
     }
 
-    private void setTrack(int index) {
+    private void playTrack(int index) {
         final var pref = WwiseSettingsPage.getPreferences();
         final var codebooks = WwiseSettingsPage.WW2OGG_CODEBOOKS_PATH.get(pref);
         final var ww2ogg = WwiseSettingsPage.WW2OGG_PATH.get(pref);
@@ -137,6 +140,7 @@ public class WwiseViewerPanel extends JPanel implements Disposable {
 
                 final var wemPath = Files.createTempFile(null, ".wem");
                 final var oggPath = Path.of(IOUtils.getBasename(wemPath.toString()) + ".ogg");
+                final var revorbedOggPath = Path.of(IOUtils.getBasename(wemPath.toString()) + "_optimized.ogg");
                 final var wavPath = Path.of(IOUtils.getBasename(wemPath.toString()) + ".wav");
 
                 try {
@@ -147,11 +151,11 @@ public class WwiseViewerPanel extends JPanel implements Disposable {
                     }
 
                     try (ProgressMonitor.Task ignored = task.split(1).begin("Invoke 'revorb'", 1)) {
-                        IOUtils.exec(revorb, oggPath);
+                        IOUtils.exec(revorb, oggPath, revorbedOggPath);
                     }
 
                     try (ProgressMonitor.Task ignored = task.split(1).begin("Invoke 'ffmpeg'", 1)) {
-                        IOUtils.exec(ffmpeg, "-acodec", "libvorbis", "-i", oggPath, "-ac", "2", wavPath, "-y");
+                        IOUtils.exec(ffmpeg, "-acodec", "libvorbis", "-i", revorbedOggPath, "-ac", "2", wavPath, "-y");
                     }
 
                     try (AudioInputStream is = AudioSystem.getAudioInputStream(wavPath.toFile())) {
@@ -165,10 +169,64 @@ public class WwiseViewerPanel extends JPanel implements Disposable {
                 } finally {
                     Files.deleteIfExists(wemPath);
                     Files.deleteIfExists(oggPath);
+                    Files.deleteIfExists(revorbedOggPath);
                     Files.deleteIfExists(wavPath);
                 }
             } catch (Exception e) {
                 UIUtils.showErrorDialog(Application.getFrame(), e, "Error playing audio");
+            }
+
+            return null;
+        });
+    }
+
+    private void saveTrackToDisk(int index) {
+        final var pref = WwiseSettingsPage.getPreferences();
+        final var codebooks = WwiseSettingsPage.WW2OGG_CODEBOOKS_PATH.get(pref);
+        final var ww2ogg = WwiseSettingsPage.WW2OGG_PATH.get(pref);
+        final var revorb = WwiseSettingsPage.REVORB_PATH.get(pref);
+        final var ffmpeg = WwiseSettingsPage.FFMPEG_PATH.get(pref);
+
+        if (codebooks.isEmpty() || ww2ogg.isEmpty() || revorb.isEmpty()) {
+            JOptionPane.showMessageDialog(
+                    Application.getFrame(),
+                    "<html>One or more native tools required for audio extraction are missing.<br><br" +
+                            ">You can specify them in <kbd>File</kbd> &rArr; <kbd>Settings</kbd> &rArr; <kbd>Wwise Audio</kbd></html>",
+                    "Can't extract audio",
+                    JOptionPane.ERROR_MESSAGE
+            );
+
+            return;
+        }
+
+        ProgressDialog.showProgressDialog(Application.getFrame(), "Prepare to extract audio", monitor -> {
+            try (ProgressMonitor.Task task = monitor.begin("Prepare to extract audio", 3)) {
+                final byte[] data;
+
+                try (ProgressMonitor.Task ignored = task.split(1).begin("Extract track data", 1)) {
+                    data = playlist.getData(index);
+                }
+
+                final var wemPath = Files.createTempFile(null, ".wem");
+                final var oggPath = Path.of(IOUtils.getBasename(wemPath.toString()) + ".ogg");
+                final var finalOggPath = Path.of(IOUtils.getBasename(playlist.getName(index)) + ".ogg");
+
+                try {
+                    Files.write(wemPath, data);
+
+                    try (ProgressMonitor.Task ignored = task.split(1).begin("Invoke 'ww2ogg'", 1)) {
+                        IOUtils.exec(ww2ogg, wemPath, "-o", oggPath, "--pcb", codebooks);
+                    }
+
+                    try (ProgressMonitor.Task ignored = task.split(1).begin("Invoke 'revorb'", 1)) {
+                        IOUtils.exec(revorb, oggPath, finalOggPath);
+                    }
+                } finally {
+                    Files.deleteIfExists(wemPath);
+                    Files.deleteIfExists(oggPath);
+                }
+            } catch (Exception e) {
+                UIUtils.showErrorDialog(Application.getFrame(), e, "Error extracting audio");
             }
 
             return null;
@@ -190,7 +248,28 @@ public class WwiseViewerPanel extends JPanel implements Disposable {
             });
             addListSelectionListener(e -> {
                 if (!e.getValueIsAdjusting() && getSelectedIndex() >= 0) {
-                    setTrack(getSelectedIndex());
+                    playTrack(getSelectedIndex());
+                }
+            });
+            addMouseListener(new MouseAdapter() {
+                private int pressedIndex = -1;
+
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    this.pressedIndex = PlaylistList.this.locationToIndex(e.getPoint());
+                }
+
+                @Override
+                public void mouseReleased(MouseEvent e) {
+                    if (SwingUtilities.isRightMouseButton(e)) {
+                        int index = PlaylistList.this.locationToIndex(e.getPoint());
+                        if (index > 0 && index == this.pressedIndex) {
+                            // Only call the saveTrackToDisk method if the user pressed and released
+                            // the right mouse button while keeping the cursor on the same list element
+                            // (no mouse dragging)
+                            WwiseViewerPanel.this.saveTrackToDisk(index);
+                        }
+                    }
                 }
             });
         }
