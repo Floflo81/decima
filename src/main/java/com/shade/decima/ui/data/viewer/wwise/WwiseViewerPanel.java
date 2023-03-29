@@ -270,6 +270,7 @@ public class WwiseViewerPanel extends JPanel implements Disposable {
                             WwiseViewerPanel.this.saveTrackToDisk(index);
                         }
                     }
+                    this.pressedIndex = -1;
                 }
             });
         }
